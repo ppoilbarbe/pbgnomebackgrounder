@@ -1,0 +1,12 @@
+To install after cloning from Git:
+
+autoreconf --install
+
+
+Then the classic:
+
+./configure
+make
+make install
+
+To run program, perl must be installed

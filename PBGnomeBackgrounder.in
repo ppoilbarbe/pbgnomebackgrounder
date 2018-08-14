@@ -1,0 +1,319 @@
+#!/usr/bin/env perl
+
+# This script allow having a different wallpaper for each gnome desktop
+# Just run it and forget it.
+# It traps the changes made with the standard background changer tool.
+#
+# (C) Ph. Poilbarbe 2006-2018
+#
+# V1.0: 2006/09/10
+# V2.0: 2008/02/11. Adapted to the Beryl/Compiz-fusion cube
+# V3.0: 2012/06/14. Adapted to Gnome 3 (gsettings).
+# V3.1: 2012/07/03. Avoid multiple instances. Catch signals to stop properly.
+#
+
+# Use minimum of modules in order to be as light as possible
+use strict;
+use warnings;
+
+our $VERSION = '@PACKAGE_VERSION@';
+my $ConfigurationFile = $ENV{HOME} . "/.PBGnomeBackgrounderrc";
+my $GSettings         = "gsettings";
+my $Scheme            = "org.gnome.desktop.background";
+my $SleepTime         = 2;
+my @SchemeKeys;
+my $ActiveDesktop = "";    # Name of active desktop
+my %Backgrounds;           # Defined backgrounds for all desktops
+                           # When a new desktop is created or activated
+                           # for the fist time it takes the last one
+my $PID_PROP = 'PBGNOME_BACKGROUNDER_RUNNING';
+
+my $PrgName = $0;
+$PrgName =~ s/^.*\///;
+
+# Read the configuration file and fill %Backgrounds with last registered values
+# (called only at startup)
+sub ReadConfigFile()
+{
+    local $_;
+    return unless -r $ConfigurationFile;
+    my $FH;
+    unless (open $FH, "<", $ConfigurationFile)
+    {
+        print STDERR "Error opening '$ConfigurationFile': $!\n";
+        return;
+    }
+    my $Entry;
+    %Backgrounds = ();
+    while (<$FH>)
+    {
+        next if m/^\s*#/;
+        m/^\s*\[\s*(\w+)\s*\]\s*$/ && do { $Entry = $1; next; };
+        m/^\s*([^\s]+)\s*=\s*(.*?)\s*$/
+            && do { $Backgrounds{$Entry}{$1} = $2 if $Entry; next; };
+    }
+    close $FH;
+}
+
+# Write the content of %Backgrounds back to configuration file
+# It is done each time a modification is detected (new desktop
+# or background change)
+sub WriteConfigFile()
+{
+    local $_;
+    my $FH;
+    open $FH, ">", $ConfigurationFile
+        or print(STDERR "Error creating '$ConfigurationFile': $!\n"), return;
+    print $FH
+        "# File automatically (re)written by $PrgName do not edit by hand\n";
+    foreach my $Entry (sort keys %Backgrounds)
+    {
+        print $FH "\n[$Entry]\n";
+        my $Value = $Backgrounds{$Entry};
+        print $FH "$_ = ", $Value->{$_}, "\n" foreach sort keys %$Value;
+    }
+    close $FH;
+}
+
+# Execute a command returning its output.
+# Executing a command is never an error. If an error occurs, an empty
+# array of lines is just returned.
+sub ExecuteCommand ($;$)
+{
+    my ($Command, $ReturnInAllCase) = @_;
+
+    my @Result;
+    open(CMDRES, "-|", $Command)
+        or print(STDERR "Error launching command '$Command': $!\n"), return ();
+    @Result = <CMDRES>;
+    close CMDRES or do
+    {
+        print(STDERR "Error with command '$Command': $?/$!\n");
+        return () unless $ReturnInAllCase;
+    };
+    chomp @Result;
+    return @Result;
+}
+
+# Retrieve the background definition of the current desktop
+sub GetCurrentBackground ()
+{
+    my %Background;
+    foreach (@SchemeKeys)
+    {
+        ($Background{$_}) = ExecuteCommand "$GSettings get $Scheme $_";
+    }
+    return wantarray ? %Background : \%Background;
+}
+
+# Get the known fields for a background definition (called schema by
+# gnome). Just to get the types.
+sub GetSchemeKeys ()
+{
+    @SchemeKeys = ExecuteCommand "$GSettings list-keys $Scheme";
+    chomp @SchemeKeys;
+}
+
+# Retrieve the value of a numeric X property
+# of the root window.
+sub GetXProp($)
+{
+    my ($Prop) = @_;
+    my $Str;
+    foreach (ExecuteCommand "xprop -root $Prop", 1)
+    {
+        exit if m/Xlib.*connection.*refused\s*by\s*server/i;
+        if (m/^\s*$Prop\(.*=\s*(.*?)\s*$/)
+        {
+            $Str = $1;
+            last;
+        }
+    }
+    my @Result = (defined($Str) ? split m/\s*,\s*/, $Str : '');
+    return (wantarray ? @Result : $Result[0]);
+}
+
+# Set the value of a numeric X property
+# of the root window.
+sub SetXProp($$)
+{
+    my ($Prop, $Value) = @_;
+    ExecuteCommand "xprop -root -f $Prop 32c -set $Prop $Value", 1;
+}
+
+# Delete a X property of the root window.
+sub RemoveXProp($)
+{
+    my ($Prop) = @_;
+    ExecuteCommand "xprop -root -remove $Prop", 1;
+}
+
+sub CheckRunningInstance ()
+{
+    my $Count = 0;
+    my $RunningPid;
+
+    # Find running instance from X property
+    while ($Count < 2)
+    {
+        $RunningPid = GetXProp $PID_PROP, 1;
+        last unless $RunningPid;
+        kill 15, $RunningPid;
+        $Count++;
+        sleep 1;
+    }
+    if ($RunningPid)
+    {
+        # Cannot be killed, try to identify process
+        print STDERR "$PrgName seems to be running as PID $RunningPid\n";
+        foreach (ExecuteCommand "ps -edf | grep $RunningPid")
+        {
+            my ($User, $Pid, $ParentPid) = split;
+            next unless $Pid == $RunningPid;
+            print STDERR "$PrgName is already running and cannot be killed ",
+                "(owner=$User)\n",
+                "Exiting\n";
+            exit 1;
+        }
+
+        # If here, it is because PBGnomeBackgrounder is not running but has
+        # stopped abnormally (not removing the X proprety)
+        print STDERR "Not running. Probably badly killed\n";
+    }
+}
+
+sub SetRunningInstance ()
+{
+    SetXProp $PID_PROP, $$;
+}
+
+sub RemoveRunningInstance ()
+{
+    my $RunningPid = GetXProp $PID_PROP, 1;
+    RemoveXProp $PID_PROP if $RunningPid && $RunningPid == $$;
+}
+
+sub CheckForSuicide ()
+{
+    my $RunningPid = GetXProp $PID_PROP, 1;
+    exit 0 if (not $RunningPid) or ($RunningPid != $$);
+}
+
+# Retrieve the current desktop. It is registered in an X-Window attribute
+# of the root window.
+sub GetCurrentDesktop ()
+{
+    my $Desktop   = undef;
+    my $NbDesktop = GetXProp("_NET_NUMBER_OF_DESKTOPS");
+    if ($NbDesktop != 1)
+    {
+        # Classic desktop
+        $Desktop = GetXProp("_NET_CURRENT_DESKTOP");
+    }
+    else
+    {
+        # Beryl or Copiz-Fusion Cube: One viewport (and one desktop) has
+        # the whole cube inside.
+        my $ScrTxt = join("\n", ExecuteCommand("xwininfo -root", 1));
+        my ($ScreenWidth)  = $ScrTxt =~ m/Width\s*:\s*(\d+)/i;
+        my ($ScreenHeight) = $ScrTxt =~ m/Height\s*:\s*(\d+)/i;
+        my ($ViewportWidth, $ViewportHeight) =
+            GetXProp("_NET_DESKTOP_GEOMETRY");
+        my ($XViewport, $YViewport) = GetXProp("_NET_DESKTOP_VIEWPORT");
+        my $NbColumns = int($ViewportWidth / $ScreenWidth);
+        my $X         = int($XViewport / $ScreenWidth);
+        my $Y         = int($YViewport / $ScreenHeight);
+        $Desktop = ($Y * $NbColumns) + $X;
+    }
+    return sprintf("Desktop%d", $Desktop);
+    return;
+}
+
+# The core routine: the one which change the background.
+# If it is a new desktop (never seen), it only get the current values
+# for the background
+sub SetActiveBackground($)
+{
+    ($ActiveDesktop) = @_;
+    if (!exists $Backgrounds{$ActiveDesktop})
+    {
+        $Backgrounds{$ActiveDesktop} = GetCurrentBackground;
+        WriteConfigFile;
+        return;
+    }
+
+    my $Def = $Backgrounds{$ActiveDesktop};
+    foreach my $Key (@SchemeKeys)
+    {
+        next unless exists $Def->{$Key};
+        system "$GSettings set $Scheme $Key " . $Def->{$Key};
+    }
+}
+
+# Check if wallpaper has changed.
+# If true, register the values and rewrite configuration file
+sub CheckWallPaper()
+{
+    my $Background = GetCurrentBackground();
+    my $Def        = $Backgrounds{$ActiveDesktop};
+    if (
+        grep { (!exists $Def->{$_}) || ($Def->{$_} ne $Background->{$_}) }
+        keys %$Background)
+    {
+        # User has changed the current background, register it
+        $Backgrounds{$ActiveDesktop} = $Background;
+        WriteConfigFile;
+    }
+}
+
+sub CatchSignal
+{
+    exit 0;
+}
+
+#=======================================================================
+#=== M A I N    P R O G R A M
+#=======================================================================
+
+open STDIN,  "<", "/dev/null";
+open STDOUT, ">", "/dev/null";
+
+GetSchemeKeys;
+ReadConfigFile;
+CheckRunningInstance;
+SetRunningInstance;
+
+$SIG{INT}  = \&CatchSignal;
+$SIG{TERM} = \&CatchSignal;
+$SIG{QUIT} = \&CatchSignal;
+$SIG{STOP} = \&CatchSignal;
+$SIG{ABRT} = \&CatchSignal;
+
+# Force changing the background in case of logging with a different
+# desktop than the one in use during last logout
+SetActiveBackground(GetCurrentDesktop);
+
+while (1)
+{
+    CheckForSuicide;
+
+    my $Desktop = GetCurrentDesktop;
+
+    # Problem getting desktop: no session opened or not gnome
+    exit unless $Desktop;
+
+    # Desktop has changed
+    SetActiveBackground($Desktop), next if $Desktop ne $ActiveDesktop;
+
+    # Has user changed the background characteristics ?
+    CheckWallPaper;
+}
+continue
+{
+    sleep $SleepTime;
+}
+
+END
+{
+    RemoveRunningInstance;
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Encoding=UTF-8
+Name=Change GNOME 3/Unity background
+Name[fr]=Changeur de fonds d'écran GNOME 3/Unity
+Comment=Change GNOME 3 background for each virtual desktop
+Comment[fr]=Change le fond d'écran GNOME 3 pour chaque bureau virtuel
+Type=Application
+Exec=PBGnomeBackgrounder
+Icon=background
+Terminal=false
+Categories=GNOME;GTK;Utility
